@@ -1,7 +1,8 @@
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 import httpx
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, Item
+from app.nodes.utils import resolve_expressions, resolve_in_object
 
 
 class HttpRequestNode(BaseNode):
@@ -14,7 +15,7 @@ class HttpRequestNode(BaseNode):
             description="Calls any external API and passes the response to the next node",
             category="action",
             color="#10b981",
-            icon="🌐",
+            icon="??",
             inputs=1,
             outputs=1,
             config_schema=[
@@ -68,81 +69,82 @@ class HttpRequestNode(BaseNode):
             ]
         )
 
-    async def execute(
-        self,
-        config: Dict[str, Any],
-        input_data: Any,
-        context: Dict[str, Any]
-    ) -> NodeResult:
-        url = config.get("url", "").strip()
-        method = config.get("method", "GET").upper()
-
-        if not url:
-            return NodeResult(success=False, error="URL is required")
-
-        if not url.startswith("http://") and not url.startswith("https://"):
-            url = "https://" + url
-
-        # Parse headers
-        headers = {}
-        if config.get("headers"):
-            try:
-                headers = json.loads(config["headers"])
-            except json.JSONDecodeError:
-                return NodeResult(success=False, error="Headers must be valid JSON. Example: {\"Authorization\": \"Bearer token\"}")
-
-        # Determine body
-        body = None
-        if config.get("use_input_as_body") and input_data:
-            body = input_data
-        elif config.get("body"):
-            try:
-                body = json.loads(config["body"])
-            except json.JSONDecodeError:
-                return NodeResult(success=False, error="Body must be valid JSON. Example: {\"key\": \"value\"}")
-
-        verify_ssl = config.get("verify_ssl", True)
-
+    def _parse_json_field(self, raw: str, data: Dict[str, Any]) -> Any:
+        if not raw:
+            return None
         try:
-            async with httpx.AsyncClient(
-                timeout=30,
-                verify=bool(verify_ssl),
-                follow_redirects=True
-            ) as client:
-                response = await client.request(
-                    method=method,
-                    url=url,
-                    headers=headers,
-                    json=body if body else None
-                )
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            raise ValueError("Must be valid JSON")
+        return resolve_in_object(parsed, data)
+
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        raw_url = (config.get("url") or "").strip()
+        method = (config.get("method") or "GET").upper()
+        verify_ssl = bool(config.get("verify_ssl", True))
+
+        if not raw_url:
+            return NodeExecutionResult(success=False, error="URL is required")
+
+        output_items: List[Item] = []
+        items = inputs[0] if inputs else []
+
+        if not items:
+            return NodeExecutionResult(success=True, outputs=[[]])
+
+        async with httpx.AsyncClient(timeout=30, verify=verify_ssl, follow_redirects=True) as client:
+            for item in items:
+                data = item.get("json", {}) if isinstance(item, dict) else {}
+                url = resolve_expressions(raw_url, data)
+                if isinstance(url, str) and not url.startswith("http://") and not url.startswith("https://"):
+                    url = "https://" + url
+
+                headers = {}
+                if config.get("headers"):
+                    try:
+                        headers = self._parse_json_field(config.get("headers"), data)
+                    except ValueError:
+                        return NodeExecutionResult(success=False, error="Headers must be valid JSON. Example: {\"Authorization\": \"Bearer token\"}")
+
+                body = None
+                if config.get("use_input_as_body") and data:
+                    body = data
+                elif config.get("body"):
+                    try:
+                        body = self._parse_json_field(config.get("body"), data)
+                    except ValueError:
+                        return NodeExecutionResult(success=False, error="Body must be valid JSON. Example: {\"key\": \"value\"}")
+
                 try:
-                    output = response.json()
+                    response = await client.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        json=body if body is not None else None,
+                    )
+                except httpx.TimeoutException:
+                    return NodeExecutionResult(success=False, error=f"Request timed out after 30 seconds. Check if the URL is correct and accessible: {url}")
+                except httpx.ConnectError:
+                    return NodeExecutionResult(success=False, error=f"Could not connect to {url}. Check your internet connection and the URL.")
+                except httpx.RequestError as e:
+                    return NodeExecutionResult(success=False, error=f"Request failed: {str(e)}")
+
+                try:
+                    payload = response.json()
                 except Exception:
-                    output = response.text
+                    payload = {"body": response.text}
 
-                return NodeResult(
-                    success=response.is_success,
-                    output=output,
-                    error=None if response.is_success else f"Server returned {response.status_code}",
-                    metadata={
+                output_items.append({
+                    "json": {
                         "status_code": response.status_code,
+                        "ok": response.is_success,
+                        "data": payload,
                         "url": url,
-                        "method": method
+                        "method": method,
                     }
-                )
+                })
 
-        except httpx.TimeoutException:
-            return NodeResult(
-                success=False,
-                error=f"Request timed out after 30 seconds. Check if the URL is correct and accessible: {url}"
-            )
-        except httpx.ConnectError:
-            return NodeResult(
-                success=False,
-                error=f"Could not connect to {url}. Check your internet connection and the URL."
-            )
-        except httpx.RequestError as e:
-            return NodeResult(
-                success=False,
-                error=f"Request failed: {str(e)}"
-            )
+                if not response.is_success:
+                    return NodeExecutionResult(success=False, error=f"Server returned {response.status_code}")
+
+        return NodeExecutionResult(success=True, outputs=[output_items])

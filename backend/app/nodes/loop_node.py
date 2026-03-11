@@ -1,5 +1,6 @@
 from typing import Any, Dict, List
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, Item, normalize_items
+from app.nodes.utils import get_nested
 
 
 class LoopNode(BaseNode):
@@ -9,10 +10,10 @@ class LoopNode(BaseNode):
         return NodeDefinition(
             type="loop_node",
             label="Loop / Split Items",
-            description="Take a list of items and process each one — like 'for each row in a spreadsheet'",
+            description="Take a list of items and process each one - like 'for each row in a spreadsheet'",
             category="logic",
             color="#8b5cf6",
-            icon="🔁",
+            icon="??",
             inputs=1,
             outputs=1,
             config_schema=[
@@ -20,7 +21,7 @@ class LoopNode(BaseNode):
                     "key": "field",
                     "label": "List field to loop over",
                     "type": "text",
-                    "placeholder": "items  or  results  or  data.rows",
+                    "placeholder": "items or results or data.rows",
                     "required": False,
                     "help": "Which field contains the list? Leave empty if the whole input is a list."
                 },
@@ -46,49 +47,37 @@ class LoopNode(BaseNode):
             ]
         )
 
-    async def execute(self, config: Dict[str, Any], input_data: Any, context: Dict[str, Any]) -> NodeResult:
-        field     = config.get("field", "").strip()
-        mode      = config.get("mode", "Pass all items as array")
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        field = (config.get("field") or "").strip()
+        mode = config.get("mode", "Pass all items as array")
         try:
             max_items = int(config.get("max_items", 100))
         except (TypeError, ValueError):
             max_items = 100
 
-        # Extract the list
-        if field:
-            parts = field.split(".")
-            data = input_data
-            for p in parts:
-                if isinstance(data, dict):
-                    data = data.get(p)
-                else:
-                    data = None
-                    break
-            items = data
-        else:
-            items = input_data
+        output_items: List[Item] = []
 
-        if items is None:
-            return NodeResult(success=False, error=f"Field '{field}' not found in input data")
+        for item in (inputs[0] if inputs else []):
+            data = item.get("json", {}) if isinstance(item, dict) else {}
+            items = get_nested(data, field) if field else data
 
-        if not isinstance(items, list):
-            items = [items]
+            if items is None:
+                return NodeExecutionResult(success=False, error=f"Field '{field}' not found in input data")
 
-        items = items[:max_items]
+            if not isinstance(items, list):
+                items = [items]
 
-        if mode == "Pass all items as array":
-            output = {"items": items, "count": len(items)}
-        elif mode == "Pass first item only":
-            output = items[0] if items else None
-        elif mode == "Pass last item only":
-            output = items[-1] if items else None
-        elif mode == "Pass count only":
-            output = {"count": len(items)}
-        else:
-            output = items
+            items = items[:max_items]
 
-        return NodeResult(
-            success=True,
-            output=output,
-            metadata={"item_count": len(items)}
-        )
+            if mode == "Pass all items as array":
+                output_items.append({"json": {"items": items, "count": len(items)}})
+            elif mode == "Pass first item only":
+                output_items.extend(normalize_items(items[0] if items else None))
+            elif mode == "Pass last item only":
+                output_items.extend(normalize_items(items[-1] if items else None))
+            elif mode == "Pass count only":
+                output_items.append({"json": {"count": len(items)}})
+            else:
+                output_items.append({"json": {"items": items}})
+
+        return NodeExecutionResult(success=True, outputs=[output_items])

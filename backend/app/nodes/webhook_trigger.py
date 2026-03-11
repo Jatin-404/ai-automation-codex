@@ -1,5 +1,5 @@
-from typing import Any, Dict
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from typing import Any, Dict, List
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, normalize_items, Item
 
 
 class WebhookTriggerNode(BaseNode):
@@ -12,8 +12,8 @@ class WebhookTriggerNode(BaseNode):
             description="Starts the workflow when an HTTP request arrives at a URL",
             category="trigger",
             color="#3b82f6",
-            icon="🔗",
-            inputs=0,   # triggers have no input
+            icon="??",
+            inputs=0,
             outputs=1,
             config_schema=[
                 {
@@ -36,16 +36,11 @@ class WebhookTriggerNode(BaseNode):
             ]
         )
 
-    async def execute(
-        self,
-        config: Dict[str, Any],
-        input_data: Any,
-        context: Dict[str, Any]
-    ) -> NodeResult:
-        # Webhook data is injected into context by the webhook route handler
-        webhook_payload = context.get("webhook_payload", {})
-        return NodeResult(
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        payload = context.trigger_payload or {}
+        items = normalize_items(payload)
+        return NodeExecutionResult(
             success=True,
-            output=webhook_payload,
+            outputs=[items],
             metadata={"path": config.get("path"), "method": config.get("method")}
         )

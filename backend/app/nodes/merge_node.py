@@ -1,6 +1,5 @@
-import json
-from typing import Any, Dict
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from typing import Any, Dict, List
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, Item
 
 
 class MergeNode(BaseNode):
@@ -13,7 +12,7 @@ class MergeNode(BaseNode):
             description="Combine data from multiple branches into one output",
             category="logic",
             color="#64748b",
-            icon="🔗",
+            icon="??",
             inputs=2,
             outputs=1,
             config_schema=[
@@ -52,34 +51,34 @@ class MergeNode(BaseNode):
             ]
         )
 
-    async def execute(self, config: Dict[str, Any], input_data: Any, context: Dict[str, Any]) -> NodeResult:
-        mode  = config.get("mode", "Combine into one object")
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        mode = config.get("mode", "Combine into one object")
         key_a = config.get("key_a", "branch_a")
         key_b = config.get("key_b", "branch_b")
 
-        # input_data may be a list of [branch_a_data, branch_b_data] when merging
-        if isinstance(input_data, list) and len(input_data) >= 2:
-            data_a = input_data[0]
-            data_b = input_data[1]
-        else:
-            data_a = input_data
-            data_b = {}
+        left = inputs[0] if len(inputs) > 0 else []
+        right = inputs[1] if len(inputs) > 1 else []
+        max_len = max(len(left), len(right))
 
-        if mode == "Combine into one object":
-            a = data_a if isinstance(data_a, dict) else {key_a: data_a}
-            b = data_b if isinstance(data_b, dict) else {key_b: data_b}
-            output = {**a, **b}
+        output_items: List[Item] = []
 
-        elif mode == "Put into array":
-            output = [data_a, data_b]
+        for idx in range(max_len):
+            a = left[idx].get("json", {}) if idx < len(left) else {}
+            b = right[idx].get("json", {}) if idx < len(right) else {}
 
-        elif mode == "Keep first branch only":
-            output = data_a
+            if mode == "Combine into one object":
+                a_obj = a if isinstance(a, dict) else {key_a: a}
+                b_obj = b if isinstance(b, dict) else {key_b: b}
+                output = {**a_obj, **b_obj}
+            elif mode == "Put into array":
+                output = {key_a: a, key_b: b}
+            elif mode == "Keep first branch only":
+                output = a
+            elif mode == "Keep second branch only":
+                output = b
+            else:
+                output = {key_a: a, key_b: b}
 
-        elif mode == "Keep second branch only":
-            output = data_b
+            output_items.append({"json": output})
 
-        else:
-            output = input_data
-
-        return NodeResult(success=True, output=output)
+        return NodeExecutionResult(success=True, outputs=[output_items])

@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Any, Dict
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from typing import Any, Dict, List
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, normalize_items, Item
 
 
 class SchedulerNode(BaseNode):
@@ -13,7 +13,7 @@ class SchedulerNode(BaseNode):
             description="Runs the workflow automatically on a repeating schedule. Use the /api/workflows/schedule endpoint to activate.",
             category="trigger",
             color="#f59e0b",
-            icon="⏰",
+            icon="?",
             inputs=0,
             outputs=1,
             config_schema=[
@@ -47,20 +47,14 @@ class SchedulerNode(BaseNode):
             ]
         )
 
-    async def execute(
-        self,
-        config: Dict[str, Any],
-        input_data: Any,
-        context: Dict[str, Any]
-    ) -> NodeResult:
-        # In MVP: manually triggered with timestamp
-        # Future: integrate APScheduler or Celery Beat
-        return NodeResult(
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        item = {
+            "triggered_at": datetime.utcnow().isoformat(),
+            "schedule": f"every {config.get('interval_value', 1)} {config.get('interval_type', 'hour')}",
+            "trigger_type": "schedule"
+        }
+        return NodeExecutionResult(
             success=True,
-            output={
-                "triggered_at": datetime.utcnow().isoformat(),
-                "schedule": f"every {config.get('interval_value', 1)} {config.get('interval_type', 'hour')}",
-                "trigger_type": "schedule"
-            },
+            outputs=[normalize_items(item)],
             metadata={"trigger_type": "schedule"}
         )

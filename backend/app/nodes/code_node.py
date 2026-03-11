@@ -3,8 +3,8 @@ import os
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Dict
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from typing import Any, Dict, List, Tuple
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, normalize_items, Item
 
 
 class CodeNode(BaseNode):
@@ -17,7 +17,7 @@ class CodeNode(BaseNode):
             description="Write custom JavaScript to transform or process your data",
             category="action",
             color="#eab308",
-            icon="</> ",
+            icon="</>",
             inputs=1,
             outputs=1,
             config_schema=[
@@ -25,9 +25,9 @@ class CodeNode(BaseNode):
                     "key": "code",
                     "label": "JavaScript Code",
                     "type": "textarea",
-                    "placeholder": "// 'input' contains the previous node's output\n// Return the value you want to pass forward\n\nreturn {\n  message: 'Hello ' + input.name,\n  timestamp: new Date().toISOString()\n}",
+                    "placeholder": "// 'input' contains the current item\n// Return the value you want to pass forward\n\nreturn {\n  message: 'Hello ' + input.name,\n  timestamp: new Date().toISOString()\n}",
                     "required": True,
-                    "help": "Use 'input' to access previous node data. Whatever you return() is passed to the next node. Requires Node.js for real JavaScript."
+                    "help": "Use 'input' to access the current item. Whatever you return() is passed to the next node. Requires Node.js for real JavaScript."
                 },
                 {
                     "key": "timeout_ms",
@@ -42,12 +42,9 @@ class CodeNode(BaseNode):
             ]
         )
 
-    def _run_js(self, code: str, input_data: Any, timeout_ms: int) -> NodeResult:
+    def _run_js(self, code: str, input_data: Any, timeout_ms: int) -> Tuple[bool, Any, str]:
         if not shutil.which("node"):
-            return NodeResult(
-                success=False,
-                error="Node.js is not installed. Install Node.js to run JavaScript code.",
-            )
+            return False, None, "Node.js is not installed. Install Node.js to run JavaScript code."
 
         input_json = json.dumps(input_data, default=str)
         script = (
@@ -76,7 +73,7 @@ class CodeNode(BaseNode):
                 env={**os.environ, "INPUT_JSON": input_json},
             )
         except subprocess.TimeoutExpired:
-            return NodeResult(success=False, error=f"Code execution timed out after {timeout_ms} ms.")
+            return False, None, f"Code execution timed out after {timeout_ms} ms."
         finally:
             try:
                 os.remove(tmp_path)
@@ -85,40 +82,22 @@ class CodeNode(BaseNode):
 
         stdout = (result.stdout or "").strip()
         if not stdout:
-            return NodeResult(
-                success=False,
-                error=(result.stderr or "No output returned from Node.js."),
-            )
+            return False, None, (result.stderr or "No output returned from Node.js.")
 
         try:
             payload = json.loads(stdout)
         except json.JSONDecodeError:
-            return NodeResult(success=False, error=f"Invalid response from Node.js: {stdout}")
+            return False, None, f"Invalid response from Node.js: {stdout}"
 
         if not payload.get("success"):
-            return NodeResult(success=False, error=payload.get("error", "Unknown JS error"))
+            return False, None, payload.get("error", "Unknown JS error")
 
-        return NodeResult(success=True, output=payload.get("result"))
+        return True, payload.get("result"), ""
 
-    async def execute(self, config: Dict[str, Any], input_data: Any, context: Dict[str, Any]) -> NodeResult:
-        code = config.get("code", "").strip()
-        if not code:
-            return NodeResult(success=False, error="No code provided")
-
-        timeout_ms = int(config.get("timeout_ms", 5000))
-
-        # Prefer real JavaScript via Node.js if available
-        js_result = self._run_js(code, input_data, timeout_ms)
-        if js_result.success:
-            return js_result
-        if js_result.error and "Node.js is not installed" not in js_result.error:
-            return js_result
-
-        # Fallback: run a limited Python-like shim for simple transformations
+    def _run_python_fallback(self, code: str, input_data: Any) -> Tuple[bool, Any, str]:
         try:
             import ast
 
-            # Build a safe execution context
             safe_globals = {
                 "__builtins__": {},
                 "input": input_data,
@@ -129,13 +108,10 @@ class CodeNode(BaseNode):
                 "zip": zip, "map": map, "filter": filter,
                 "sorted": sorted, "reversed": reversed,
                 "min": min, "max": max, "sum": sum,
-                "print": print,
             }
 
-            # Wrap code in a function to support return statements
             wrapped = "def _user_fn(input):\n"
             for line in code.split("\n"):
-                # Skip JS-specific syntax
                 line = line.replace("const ", "").replace("let ", "").replace("var ", "")
                 line = line.replace("===", "==").replace("!==", "!=")
                 line = line.replace("true", "True").replace("false", "False").replace("null", "None")
@@ -145,14 +121,30 @@ class CodeNode(BaseNode):
             local_vars = {"input": input_data}
             exec(wrapped, safe_globals, local_vars)
             result = local_vars.get("_result")
-
-            return NodeResult(success=True, output=result)
-
+            return True, result, ""
         except Exception as e:
-            return NodeResult(
-                success=False,
-                error=(
-                    f"Code error: {str(e)}\n\n"
-                    "Tip: Install Node.js for real JavaScript support or use simple Python-style code."
-                )
+            return False, None, (
+                f"Code error: {str(e)}\n\n"
+                "Tip: Install Node.js for real JavaScript support or use simple Python-style code."
             )
+
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        code = (config.get("code") or "").strip()
+        if not code:
+            return NodeExecutionResult(success=False, error="No code provided")
+
+        timeout_ms = int(config.get("timeout_ms", 5000))
+        output_items: List[Item] = []
+
+        for item in (inputs[0] if inputs else []):
+            data = item.get("json", {}) if isinstance(item, dict) else {}
+            ok, result, err = self._run_js(code, data, timeout_ms)
+            if not ok and "Node.js is not installed" in err:
+                ok, result, err = self._run_python_fallback(code, data)
+
+            if not ok:
+                return NodeExecutionResult(success=False, error=err)
+
+            output_items.extend(normalize_items(result))
+
+        return NodeExecutionResult(success=True, outputs=[output_items])

@@ -1,10 +1,10 @@
 import smtplib
-import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from typing import Any, Dict
+from typing import Any, Dict, List
 import httpx
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, Item
+from app.nodes.utils import resolve_expressions, json_dumps_safe
 
 
 class NotificationNode(BaseNode):
@@ -17,7 +17,7 @@ class NotificationNode(BaseNode):
             description="Send an email or Slack message with data from your workflow",
             category="action",
             color="#ec4899",
-            icon="🔔",
+            icon="??",
             inputs=1,
             outputs=1,
             config_schema=[
@@ -30,7 +30,6 @@ class NotificationNode(BaseNode):
                     "required": True,
                     "help": "Choose how to send the notification"
                 },
-                # --- Email fields ---
                 {
                     "key": "smtp_host",
                     "label": "SMTP Host",
@@ -61,7 +60,7 @@ class NotificationNode(BaseNode):
                     "type": "text",
                     "placeholder": "xxxx xxxx xxxx xxxx",
                     "required": False,
-                    "help": "Gmail: create at myaccount.google.com → Security → App Passwords"
+                    "help": "Gmail: create at myaccount.google.com -> Security -> App Passwords"
                 },
                 {
                     "key": "to_email",
@@ -85,16 +84,15 @@ class NotificationNode(BaseNode):
                     "type": "textarea",
                     "placeholder": "Hello,\n\nHere is the result: {{data}}\n\nRegards",
                     "required": False,
-                    "help": "Use {{data}} to include the previous node's output in the message"
+                    "help": "Use {{data}} to include the current item's JSON"
                 },
-                # --- Slack fields ---
                 {
                     "key": "slack_webhook_url",
                     "label": "Slack Webhook URL",
                     "type": "text",
                     "placeholder": "https://hooks.slack.com/services/xxx/yyy/zzz",
                     "required": False,
-                    "help": "Get this from: Slack → Apps → Incoming Webhooks → Add New Webhook"
+                    "help": "Get this from: Slack -> Apps -> Incoming Webhooks -> Add New Webhook"
                 },
                 {
                     "key": "slack_message",
@@ -102,84 +100,78 @@ class NotificationNode(BaseNode):
                     "type": "textarea",
                     "placeholder": "Workflow completed! Result: {{data}}",
                     "required": False,
-                    "help": "Use {{data}} to include the previous node's output"
+                    "help": "Use {{data}} to include the current item's JSON"
                 }
             ]
         )
 
-    def _fill_template(self, template: str, data: Any) -> str:
-        """Replace {{data}} in template with actual data."""
-        import json
-        if isinstance(data, (dict, list)):
-            data_str = json.dumps(data, indent=2)
-        else:
-            data_str = str(data)
-        return template.replace("{{data}}", data_str)
+    def _render(self, template: str, data: Any) -> str:
+        if template is None:
+            return ""
+        rendered = template.replace("{{data}}", json_dumps_safe(data))
+        return resolve_expressions(rendered, data if isinstance(data, dict) else {})
 
-    async def execute(self, config: Dict[str, Any], input_data: Any, context: Dict[str, Any]) -> NodeResult:
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
         channel = config.get("channel", "Email (SMTP)")
+        items = inputs[0] if inputs else []
+        output_items: List[Item] = []
 
         if channel == "Email (SMTP)":
-            return await self._send_email(config, input_data)
-        elif channel == "Slack Webhook":
-            return await self._send_slack(config, input_data)
-        else:
-            return NodeResult(success=False, error=f"Unknown channel: {channel}")
+            host = (config.get("smtp_host") or "").strip()
+            port = int(config.get("smtp_port", 587))
+            user = (config.get("smtp_user") or "").strip()
+            passwd = (config.get("smtp_pass") or "").strip()
+            to = (config.get("to_email") or "").strip()
 
-    async def _send_email(self, config: Dict, input_data: Any) -> NodeResult:
-        host    = config.get("smtp_host", "").strip()
-        port    = int(config.get("smtp_port", 587))
-        user    = config.get("smtp_user", "").strip()
-        passwd  = config.get("smtp_pass", "").strip()
-        to      = config.get("to_email", "").strip()
-        subject = config.get("subject", "Workflow Notification")
-        body    = self._fill_template(config.get("message", "Workflow completed.\n\nData: {{data}}"), input_data)
+            if not all([host, user, passwd, to]):
+                return NodeExecutionResult(success=False, error="Email requires: SMTP Host, Your Email, App Password, and Send To fields")
 
-        if not all([host, user, passwd, to]):
-            return NodeResult(success=False, error="Email requires: SMTP Host, Your Email, App Password, and Send To fields")
+            for item in items:
+                data = item.get("json", {}) if isinstance(item, dict) else {}
+                subject = self._render(config.get("subject", "Workflow Notification"), data)
+                body = self._render(config.get("message", "Workflow completed.\n\nData: {{data}}"), data)
 
-        try:
-            msg = MIMEMultipart()
-            msg["From"]    = user
-            msg["To"]      = to
-            msg["Subject"] = subject
-            msg.attach(MIMEText(body, "plain"))
+                try:
+                    msg = MIMEMultipart()
+                    msg["From"] = user
+                    msg["To"] = to
+                    msg["Subject"] = subject
+                    msg.attach(MIMEText(body, "plain"))
 
-            with smtplib.SMTP(host, port) as server:
-                server.ehlo()
-                server.starttls()
-                server.login(user, passwd)
-                server.sendmail(user, to, msg.as_string())
+                    with smtplib.SMTP(host, port) as server:
+                        server.ehlo()
+                        server.starttls()
+                        server.login(user, passwd)
+                        server.sendmail(user, to, msg.as_string())
 
-            return NodeResult(
-                success=True,
-                output={"sent": True, "to": to, "subject": subject, "channel": "email"},
-                metadata={"channel": "email"}
-            )
-        except smtplib.SMTPAuthenticationError:
-            return NodeResult(success=False, error="Email login failed. Check your email and App Password.")
-        except smtplib.SMTPException as e:
-            return NodeResult(success=False, error=f"Email error: {str(e)}")
-        except Exception as e:
-            return NodeResult(success=False, error=f"Could not send email: {str(e)}")
+                    output_items.append({"json": {"sent": True, "to": to, "subject": subject, "channel": "email"}})
+                except smtplib.SMTPAuthenticationError:
+                    return NodeExecutionResult(success=False, error="Email login failed. Check your email and App Password.")
+                except smtplib.SMTPException as e:
+                    return NodeExecutionResult(success=False, error=f"Email error: {str(e)}")
+                except Exception as e:
+                    return NodeExecutionResult(success=False, error=f"Could not send email: {str(e)}")
 
-    async def _send_slack(self, config: Dict, input_data: Any) -> NodeResult:
-        webhook_url = config.get("slack_webhook_url", "").strip()
-        message     = self._fill_template(config.get("slack_message", "Workflow completed: {{data}}"), input_data)
+            return NodeExecutionResult(success=True, outputs=[output_items])
 
-        if not webhook_url:
-            return NodeResult(success=False, error="Slack Webhook URL is required")
+        if channel == "Slack Webhook":
+            webhook_url = (config.get("slack_webhook_url") or "").strip()
+            if not webhook_url:
+                return NodeExecutionResult(success=False, error="Slack Webhook URL is required")
 
-        try:
             async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.post(webhook_url, json={"text": message})
-                if response.status_code == 200:
-                    return NodeResult(
-                        success=True,
-                        output={"sent": True, "channel": "slack", "message": message},
-                        metadata={"channel": "slack"}
-                    )
-                else:
-                    return NodeResult(success=False, error=f"Slack returned {response.status_code}: {response.text}")
-        except Exception as e:
-            return NodeResult(success=False, error=f"Slack error: {str(e)}")
+                for item in items:
+                    data = item.get("json", {}) if isinstance(item, dict) else {}
+                    message = self._render(config.get("slack_message", "Workflow completed: {{data}}"), data)
+                    try:
+                        response = await client.post(webhook_url, json={"text": message})
+                        if response.status_code == 200:
+                            output_items.append({"json": {"sent": True, "channel": "slack", "message": message}})
+                        else:
+                            return NodeExecutionResult(success=False, error=f"Slack returned {response.status_code}: {response.text}")
+                    except Exception as e:
+                        return NodeExecutionResult(success=False, error=f"Slack error: {str(e)}")
+
+            return NodeExecutionResult(success=True, outputs=[output_items])
+
+        return NodeExecutionResult(success=False, error=f"Unknown channel: {channel}")

@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Any, Dict
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from typing import Any, Dict, List
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, normalize_items, Item
 
 
 class ManualTrigger(BaseNode):
@@ -13,7 +13,7 @@ class ManualTrigger(BaseNode):
             description="Start the workflow manually by clicking Run Workflow",
             category="trigger",
             color="#6366f1",
-            icon="▶️",
+            icon="??",
             inputs=0,
             outputs=1,
             config_schema=[
@@ -27,14 +27,15 @@ class ManualTrigger(BaseNode):
                 }
             ]
         )
-    
-    async def execute(self, config: Dict[str, Any], input_data: Any, context: Dict[str, Any]) -> NodeResult:
-        return NodeResult(
+
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        item = {
+            "triggered_at": datetime.utcnow().isoformat(),
+            "trigger_type": "manual",
+            "note": config.get("note", "")
+        }
+        return NodeExecutionResult(
             success=True,
-            output={
-                "trigger_at": datetime.utcnow().isoformat(),
-                "trigger_type": "manual",
-                "note": config.get("note", "")
-            },
+            outputs=[normalize_items(item)],
             metadata={"trigger_type": "manual"}
         )

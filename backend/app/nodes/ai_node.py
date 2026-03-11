@@ -1,7 +1,8 @@
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 import httpx
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, Item
+from app.nodes.utils import resolve_expressions
 
 
 class AiNode(BaseNode):
@@ -14,7 +15,7 @@ class AiNode(BaseNode):
             description="Send data to a local AI model (Ollama) or any OpenAI-compatible API",
             category="ai",
             color="#8b5cf6",
-            icon="🤖",
+            icon="??",
             inputs=1,
             outputs=1,
             config_schema=[
@@ -33,7 +34,7 @@ class AiNode(BaseNode):
                     "type": "text",
                     "placeholder": "http://localhost:11434",
                     "required": False,
-                    "help": "Ollama default: http://localhost:11434 — leave empty for simulation"
+                    "help": "Ollama default: http://localhost:11434 - leave empty for simulation"
                 },
                 {
                     "key": "api_key",
@@ -58,7 +59,7 @@ class AiNode(BaseNode):
                     "type": "textarea",
                     "placeholder": "You are a helpful assistant. Summarize the following data:",
                     "required": True,
-                    "help": "Instructions for the AI. The previous node's output is appended automatically."
+                    "help": "Instructions for the AI. The current item is appended automatically."
                 },
                 {
                     "key": "temperature",
@@ -74,97 +75,82 @@ class AiNode(BaseNode):
             ]
         )
 
-    async def execute(
-        self,
-        config: Dict[str, Any],
-        input_data: Any,
-        context: Dict[str, Any]
-    ) -> NodeResult:
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
         provider = config.get("provider", "simulate")
         prompt = config.get("prompt", "Process this data:")
         model = config.get("model", "llama3")
         temperature = float(config.get("temperature", 0.7))
 
-        # Build the full message
-        input_text = json.dumps(input_data, indent=2) if isinstance(input_data, (dict, list)) else str(input_data or "")
-        full_prompt = f"{prompt}\n\n{input_text}"
+        output_items: List[Item] = []
+        items = inputs[0] if inputs else []
 
-        # --- Simulation mode (no model needed) ---
-        if provider == "simulate":
-            simulated = (
-                f"[AI Simulation] Processed with model '{model}'.\n"
-                f"Prompt: {prompt[:80]}...\n"
-                f"Input length: {len(input_text)} chars\n"
-                f"Result: This is a simulated AI response. Connect Ollama to get real responses."
-            )
-            return NodeResult(
-                success=True,
-                output={"response": simulated, "model": model, "simulated": True},
-                metadata={"provider": "simulate", "model": model}
-            )
+        for item in items:
+            data = item.get("json", {}) if isinstance(item, dict) else {}
+            resolved_prompt = resolve_expressions(prompt, data)
+            input_text = json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data or "")
+            full_prompt = f"{resolved_prompt}\n\n{input_text}"
 
-        # --- Ollama mode ---
-        if provider == "ollama":
-            base_url = config.get("base_url", "http://localhost:11434").rstrip("/")
-            try:
-                async with httpx.AsyncClient(timeout=120) as client:
-                    response = await client.post(
-                        f"{base_url}/api/generate",
-                        json={
-                            "model": model,
-                            "prompt": full_prompt,
-                            "temperature": temperature,
-                            "stream": False
-                        }
-                    )
-                    if response.is_success:
-                        data = response.json()
-                        return NodeResult(
-                            success=True,
-                            output={"response": data.get("response", ""), "model": model},
-                            metadata={"provider": "ollama", "model": model}
-                        )
-                    else:
-                        return NodeResult(
-                            success=False,
-                            error=f"Ollama returned {response.status_code}: {response.text}"
-                        )
-            except httpx.ConnectError:
-                return NodeResult(
-                    success=False,
-                    error=(
-                        "Cannot connect to Ollama. "
-                        "Make sure Ollama is running: `ollama serve` "
-                        f"and the model is pulled: `ollama pull {model}`"
-                    )
+            if provider == "simulate":
+                simulated = (
+                    f"[AI Simulation] Processed with model '{model}'.\n"
+                    f"Prompt: {str(resolved_prompt)[:80]}...\n"
+                    f"Input length: {len(input_text)} chars\n"
+                    "Result: This is a simulated AI response. Connect Ollama to get real responses."
                 )
+                output_items.append({"json": {"response": simulated, "model": model, "simulated": True}})
+                continue
 
-        # --- OpenAI-compatible mode ---
-        if provider == "openai_compatible":
-            base_url = config.get("base_url", "http://localhost:11434/v1").rstrip("/")
-            api_key = config.get("api_key", "not-needed")
-            try:
-                async with httpx.AsyncClient(timeout=120) as client:
-                    response = await client.post(
-                        f"{base_url}/chat/completions",
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        json={
-                            "model": model,
-                            "messages": [{"role": "user", "content": full_prompt}],
-                            "temperature": temperature
-                        }
-                    )
-                    if response.is_success:
-                        data = response.json()
-                        text = data["choices"][0]["message"]["content"]
-                        return NodeResult(
-                            success=True,
-                            output={"response": text, "model": model},
-                            metadata={"provider": "openai_compatible"}
+            if provider == "ollama":
+                base_url = (config.get("base_url") or "http://localhost:11434").rstrip("/")
+                try:
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        response = await client.post(
+                            f"{base_url}/api/generate",
+                            json={
+                                "model": model,
+                                "prompt": full_prompt,
+                                "temperature": temperature,
+                                "stream": False
+                            }
                         )
-                    else:
-                        return NodeResult(success=False, error=f"API error: {response.text}")
-            except httpx.ConnectError as e:
-                return NodeResult(success=False, error=f"Connection failed: {str(e)}")
+                        if response.is_success:
+                            data_resp = response.json()
+                            output_items.append({"json": {"response": data_resp.get("response", ""), "model": model}})
+                            continue
+                        return NodeExecutionResult(success=False, error=f"Ollama returned {response.status_code}: {response.text}")
+                except httpx.ConnectError:
+                    return NodeExecutionResult(
+                        success=False,
+                        error=(
+                            "Cannot connect to Ollama. "
+                            "Make sure Ollama is running: `ollama serve` "
+                            f"and the model is pulled: `ollama pull {model}`"
+                        )
+                    )
 
-        return NodeResult(success=False, error=f"Unknown provider: {provider}")
+            if provider == "openai_compatible":
+                base_url = (config.get("base_url") or "http://localhost:11434/v1").rstrip("/")
+                api_key = config.get("api_key", "not-needed")
+                try:
+                    async with httpx.AsyncClient(timeout=120) as client:
+                        response = await client.post(
+                            f"{base_url}/chat/completions",
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            json={
+                                "model": model,
+                                "messages": [{"role": "user", "content": full_prompt}],
+                                "temperature": temperature
+                            }
+                        )
+                        if response.is_success:
+                            data_resp = response.json()
+                            text = data_resp["choices"][0]["message"]["content"]
+                            output_items.append({"json": {"response": text, "model": model}})
+                            continue
+                        return NodeExecutionResult(success=False, error=f"API error: {response.text}")
+                except httpx.ConnectError as e:
+                    return NodeExecutionResult(success=False, error=f"Connection failed: {str(e)}")
+
+            return NodeExecutionResult(success=False, error=f"Unknown provider: {provider}")
+
+        return NodeExecutionResult(success=True, outputs=[output_items])

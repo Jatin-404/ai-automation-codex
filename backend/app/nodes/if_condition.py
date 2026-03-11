@@ -1,6 +1,6 @@
-import operator
-from typing import Any, Dict
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from typing import Any, Dict, List
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, Item
+from app.nodes.utils import get_nested
 
 OPS = {
     "equals":       lambda a, b: str(a).strip().lower() == str(b).strip().lower(),
@@ -16,15 +16,6 @@ OPS = {
 }
 
 
-def get_nested(data: Any, path: str) -> Any:
-    for key in path.split("."):
-        if isinstance(data, dict):
-            data = data.get(key)
-        else:
-            return None
-    return data
-
-
 class IfConditionNode(BaseNode):
 
     @classmethod
@@ -32,10 +23,10 @@ class IfConditionNode(BaseNode):
         return NodeDefinition(
             type="if_condition",
             label="IF Condition",
-            description="Check a condition — if TRUE goes one way, if FALSE goes another way",
+            description="Check a condition - TRUE goes one way, FALSE goes another way",
             category="logic",
             color="#f97316",
-            icon="🔀",
+            icon="??",
             inputs=1,
             outputs=2,
             config_schema=[
@@ -43,7 +34,7 @@ class IfConditionNode(BaseNode):
                     "key": "field",
                     "label": "Field to check",
                     "type": "text",
-                    "placeholder": "status  or  user.age  or  price",
+                    "placeholder": "status or user.age or price",
                     "required": True,
                     "help": "Which field from the previous data to check. Use dot notation for nested: user.name"
                 },
@@ -68,42 +59,46 @@ class IfConditionNode(BaseNode):
                     "key": "true_label",
                     "label": "TRUE path label",
                     "type": "text",
-                    "default": "✅ Yes",
+                    "default": "? Yes",
                     "required": False
                 },
                 {
                     "key": "false_label",
                     "label": "FALSE path label",
                     "type": "text",
-                    "default": "❌ No",
+                    "default": "? No",
                     "required": False
                 }
             ]
         )
 
-    async def execute(self, config: Dict[str, Any], input_data: Any, context: Dict[str, Any]) -> NodeResult:
-        field     = config.get("field", "")
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
+        field = config.get("field", "")
         condition = config.get("condition", "equals")
-        compare   = config.get("value", "")
-
-        actual = get_nested(input_data, field) if isinstance(input_data, dict) else input_data
+        compare = config.get("value", "")
 
         op_fn = OPS.get(condition)
         if not op_fn:
-            return NodeResult(success=False, error=f"Unknown condition: {condition}")
+            return NodeExecutionResult(success=False, error=f"Unknown condition: {condition}")
 
-        try:
-            result = op_fn(actual, compare)
-        except (ValueError, TypeError) as e:
-            return NodeResult(success=False, error=f"Could not compare values: {e}")
+        true_items: List[Item] = []
+        false_items: List[Item] = []
 
-        return NodeResult(
+        for item in (inputs[0] if inputs else []):
+            data = item.get("json", {}) if isinstance(item, dict) else {}
+            actual = get_nested(data, field) if field else data
+            try:
+                result = op_fn(actual, compare)
+            except (ValueError, TypeError) as e:
+                return NodeExecutionResult(success=False, error=f"Could not compare values: {e}")
+
+            if result:
+                true_items.append(item)
+            else:
+                false_items.append(item)
+
+        return NodeExecutionResult(
             success=True,
-            output={
-                "data": input_data,
-                "branch": "true" if result else "false",
-                "matched": result,
-                "evaluated": {"field": field, "actual": actual, "condition": condition, "compare": compare}
-            },
-            metadata={"branch": "true" if result else "false", "output_index": 0 if result else 1}
+            outputs=[true_items, false_items],
+            metadata={"true_count": len(true_items), "false_count": len(false_items)}
         )

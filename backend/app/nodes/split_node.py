@@ -1,32 +1,19 @@
-import json
-import operator
-from typing import Any, Dict
-from app.nodes.base import BaseNode, NodeDefinition, NodeResult
+from typing import Any, Dict, List
+from app.nodes.base import BaseNode, NodeDefinition, NodeExecutionResult, Item
+from app.nodes.utils import get_nested
 
 OPS = {
-    "equals":           operator.eq,
-    "not equals":       operator.ne,
-    "greater than":     operator.gt,
-    "less than":        operator.lt,
-    "contains":         lambda a, b: str(b).lower() in str(a).lower(),
-    "not contains":     lambda a, b: str(b).lower() not in str(a).lower(),
-    "is empty":         lambda a, _: not a,
-    "is not empty":     lambda a, _: bool(a),
-    "starts with":      lambda a, b: str(a).startswith(str(b)),
-    "ends with":        lambda a, b: str(a).endswith(str(b)),
+    "equals":       lambda a, b: str(a).strip().lower() == str(b).strip().lower(),
+    "not equals":   lambda a, b: str(a).strip().lower() != str(b).strip().lower(),
+    "greater than": lambda a, b: float(a) > float(b),
+    "less than":    lambda a, b: float(a) < float(b),
+    "contains":     lambda a, b: str(b).lower() in str(a).lower(),
+    "not contains": lambda a, b: str(b).lower() not in str(a).lower(),
+    "is empty":     lambda a, b: not a or str(a).strip() == "",
+    "is not empty": lambda a, b: bool(a) and str(a).strip() != "",
+    "starts with":  lambda a, b: str(a).lower().startswith(str(b).lower()),
+    "ends with":    lambda a, b: str(a).lower().endswith(str(b).lower()),
 }
-
-
-def _get_nested(data: Any, path: str) -> Any:
-    """Access nested dict values using dot notation: 'user.name'"""
-    keys = path.split(".")
-    current = data
-    for key in keys:
-        if isinstance(current, dict):
-            current = current.get(key)
-        else:
-            return None
-    return current
 
 
 class SplitNode(BaseNode):
@@ -36,18 +23,18 @@ class SplitNode(BaseNode):
         return NodeDefinition(
             type="split",
             label="Split / Condition",
-            description="Routes data down different paths based on a condition — like an IF statement",
+            description="Routes items down different paths based on a condition",
             category="logic",
             color="#ef4444",
-            icon="🔀",
+            icon="??",
             inputs=1,
-            outputs=2,   # output 0 = TRUE path, output 1 = FALSE path
+            outputs=2,
             config_schema=[
                 {
                     "key": "field",
                     "label": "Field to check",
                     "type": "text",
-                    "placeholder": "status  (or  user.age  for nested)",
+                    "placeholder": "status (or user.age for nested)",
                     "required": True,
                     "help": "Which field from the previous node's output to evaluate. Use dot notation for nested fields."
                 },
@@ -73,7 +60,7 @@ class SplitNode(BaseNode):
                     "label": "TRUE path label",
                     "type": "text",
                     "placeholder": "Yes / Match",
-                    "default": "✅ True",
+                    "default": "? True",
                     "required": False
                 },
                 {
@@ -81,64 +68,36 @@ class SplitNode(BaseNode):
                     "label": "FALSE path label",
                     "type": "text",
                     "placeholder": "No / No match",
-                    "default": "❌ False",
+                    "default": "? False",
                     "required": False
                 }
             ]
         )
 
-    async def execute(
-        self,
-        config: Dict[str, Any],
-        input_data: Any,
-        context: Dict[str, Any]
-    ) -> NodeResult:
+    async def execute(self, config: Dict[str, Any], inputs: List[List[Item]], context) -> NodeExecutionResult:
         field = config.get("field", "")
         condition = config.get("condition", "equals")
-        compare_value = config.get("value", "")
+        compare = config.get("value", "")
 
-        # Extract the field value from input
-        if isinstance(input_data, dict):
-            actual_value = _get_nested(input_data, field)
-        else:
-            actual_value = input_data
-
-        # Evaluate the condition
         op_fn = OPS.get(condition)
         if not op_fn:
-            return NodeResult(success=False, error=f"Unknown condition: {condition}")
+            return NodeExecutionResult(success=False, error=f"Unknown condition: {condition}")
 
-        try:
-            # Try numeric comparison
+        true_items: List[Item] = []
+        false_items: List[Item] = []
+
+        for item in (inputs[0] if inputs else []):
+            data = item.get("json", {}) if isinstance(item, dict) else {}
+            actual = get_nested(data, field) if field else data
             try:
-                actual_num = float(actual_value) if actual_value is not None else None
-                compare_num = float(compare_value) if compare_value else None
-                if actual_num is not None and compare_num is not None:
-                    result = op_fn(actual_num, compare_num)
-                else:
-                    result = op_fn(actual_value, compare_value)
-            except (ValueError, TypeError):
-                result = op_fn(actual_value, compare_value)
+                result = op_fn(actual, compare)
+            except (ValueError, TypeError) as e:
+                return NodeExecutionResult(success=False, error=f"Condition evaluation failed: {str(e)}")
 
-        except Exception as e:
-            return NodeResult(success=False, error=f"Condition evaluation failed: {str(e)}")
+            (true_items if result else false_items).append(item)
 
-        return NodeResult(
+        return NodeExecutionResult(
             success=True,
-            output={
-                "data": input_data,          # pass original data through
-                "branch": "true" if result else "false",
-                "matched": result,
-                "evaluated": {
-                    "field": field,
-                    "actual_value": actual_value,
-                    "condition": condition,
-                    "compare_value": compare_value,
-                    "result": result
-                }
-            },
-            metadata={
-                "branch": "true" if result else "false",
-                "output_index": 0 if result else 1   # engine uses this to route
-            }
+            outputs=[true_items, false_items],
+            metadata={"true_count": len(true_items), "false_count": len(false_items)}
         )
