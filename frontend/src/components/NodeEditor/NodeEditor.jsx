@@ -58,9 +58,13 @@ export default function NodeEditor() {
   )
   const hasInput  = Object.keys(flatInput).length > 0
 
-  const outputData = stepResult?.node_outputs?.[selectedNode.id]
-                  ?? runResult?.node_outputs?.[selectedNode.id]
-  const flatOutput = outputData ? flattenObject(outputData) : {}
+  const outputItems = stepResult?.node_items?.[selectedNode.id]?.[0]
+                   ?? runResult?.node_items?.[selectedNode.id]?.[0]
+  const outputData = outputItems
+    ? outputItems.map(i => i?.json ?? i)
+    : (stepResult?.node_outputs?.[selectedNode.id] ?? runResult?.node_outputs?.[selectedNode.id])
+  const schemaSource = Array.isArray(outputData) ? outputData[0] : outputData
+  const flatOutput = schemaSource ? flattenObject(schemaSource) : {}
   const hasOutput  = outputData !== undefined
 
   const handleChange = (key, value) => {
@@ -129,7 +133,7 @@ export default function NodeEditor() {
   }
 
   const nodeStatus = nodeRunStates?.[selectedNode.id]
-    ?? (stepResult?.node_outputs?.[selectedNode.id] !== undefined ? 'success' : undefined)
+    ?? (stepResult?.node_items?.[selectedNode.id] !== undefined ? 'success' : undefined)
     ?? (stepError ? 'error' : undefined)
 
   return (

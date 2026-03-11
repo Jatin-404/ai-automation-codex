@@ -1,5 +1,4 @@
-import { Handle, Position, useReactFlow } from '@xyflow/react'
-import { useState } from 'react'
+import { Handle, Position } from '@xyflow/react'
 import useWorkflowStore from '../../store/workflowStore'
 import clsx from 'clsx'
 import './BaseNode.css'
@@ -22,9 +21,16 @@ export default function BaseNode({ id, data, selected }) {
     selectNode(node)
   }
 
-  const hasInput  = def.inputs  > 0
-  const hasOutput = def.outputs > 0
-  const hasTwoOutputs = def.outputs === 2
+  const inputCount = def.inputs || 0
+  const outputCount = def.outputs || 0
+  const hasInput = inputCount > 0
+  const hasOutput = outputCount > 0
+  const hasTwoOutputs = outputCount === 2
+
+  const inputHandles = Array.from({ length: inputCount }, (_, i) => ({
+    id: `input-${i}`,
+    top: inputCount === 1 ? '50%' : `${((i + 1) / (inputCount + 1)) * 100}%`
+  }))
 
   return (
     <div
@@ -32,18 +38,21 @@ export default function BaseNode({ id, data, selected }) {
       style={{ '--node-color': color }}
       onClick={handleClick}
     >
-      {/* Input handle */}
-      {hasInput && (
+      {/* Input handles */}
+      {hasInput && inputHandles.map(h => (
         <Handle
+          key={h.id}
           type="target"
           position={Position.Left}
+          id={h.id}
+          style={{ top: h.top }}
           className="node-handle node-handle--input"
         />
-      )}
+      ))}
 
       {/* Node header */}
       <div className="base-node__header">
-        <span className="base-node__icon">{def.icon || '⚙️'}</span>
+        <span className="base-node__icon">{def.icon || '??'}</span>
         <div className="base-node__titles">
           <span className="base-node__label">{data.label || def.label}</span>
           <span className="base-node__type">{def.category}</span>
@@ -84,8 +93,8 @@ export default function BaseNode({ id, data, selected }) {
             className="node-handle node-handle--output node-handle--false"
           />
           <div className="split-labels">
-            <span className="split-label split-label--true">✅</span>
-            <span className="split-label split-label--false">❌</span>
+            <span className="split-label split-label--true">?</span>
+            <span className="split-label split-label--false">?</span>
           </div>
         </>
       )}
@@ -95,9 +104,8 @@ export default function BaseNode({ id, data, selected }) {
 
 function getConfigPreview(config, def) {
   if (!config || Object.keys(config).length === 0) {
-    return <span className="preview-empty">Click to configure →</span>
+    return <span className="preview-empty">Click to configure ?</span>
   }
-  // Show the first 2 filled config values as a preview
   const entries = Object.entries(config).filter(([, v]) => v !== '' && v !== null && v !== undefined)
   const top = entries.slice(0, 2)
   return top.map(([k, v]) => (

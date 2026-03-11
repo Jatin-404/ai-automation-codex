@@ -86,7 +86,8 @@ const useWorkflowStore = create((set, get) => ({
     incomingEdges.forEach(e => {
       const sourceNode = nodes.find(n => n.id === e.source)
       const label = sourceNode?.data?.label || sourceNode?.id || e.source
-      merged[label] = schemas[e.source] || {}
+      const inputLabel = e.targetHandle ? `${label} (${e.targetHandle})` : label
+      merged[inputLabel] = schemas[e.source] || {}
     })
     return merged
   },
@@ -113,8 +114,18 @@ const useWorkflowStore = create((set, get) => ({
       })
     }
 
-    // Store output schemas from node outputs
-    if (r?.node_outputs) {
+    // Store output schemas from node items (n8n-style)
+    if (r?.node_items) {
+      Object.entries(r.node_items).forEach(([nodeId, outputs]) => {
+        const firstItem = outputs?.[0]?.[0]
+        const json = firstItem?.json
+        if (json && typeof json === 'object' && !Array.isArray(json)) {
+          nodeOutputSchemas[nodeId] = json
+        } else if (json !== undefined) {
+          nodeOutputSchemas[nodeId] = { value: json }
+        }
+      })
+    } else if (r?.node_outputs) {
       Object.entries(r.node_outputs).forEach(([nodeId, output]) => {
         if (output && typeof output === 'object' && !Array.isArray(output)) {
           nodeOutputSchemas[nodeId] = output
