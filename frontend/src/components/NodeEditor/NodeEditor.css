@@ -390,5 +390,13 @@
 .pf__slider     { flex: 1; accent-color: #6366f1; }
 .pf__slider-val { font-size: 11px; color: #555a80; font-family: 'DM Mono', monospace; min-width: 28px; }
 
+.pf__cond-row {
+  display: grid;
+  grid-template-columns: 1fr 170px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

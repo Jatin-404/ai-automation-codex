@@ -14,10 +14,8 @@ const nodeTypes = {
   notification:    wrap,
   whatsapp:        wrap,
   // Logic
-  if_condition:    wrap,
-  split:           wrap,
-  loop_node:       wrap,
-  merge:           wrap,
+  filter_items:    wrap,
+  limit_items:     wrap,
   // AI
   ai_node:         wrap,
 }

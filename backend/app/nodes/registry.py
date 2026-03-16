@@ -15,7 +15,16 @@ class NodeRegistry:
     def discover(cls):
         """Scan the nodes package and import every module."""
         import app.nodes as nodes_pkg
-        skip = {"base", "registry", "__init__"}
+        # Legacy nodes kept on disk but removed from the palette
+        skip = {
+            "base",
+            "registry",
+            "__init__",
+            "if_condition",
+            "split_node",
+            "loop_node",
+            "merge_node",
+        }
 
         for _, module_name, _ in pkgutil.iter_modules(nodes_pkg.__path__):
             if module_name in skip:

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import useWorkflowStore from '../../store/workflowStore'
 import { X, Play, Loader, Search, Copy, Check, GripVertical, Plus, Trash2, ChevronDown } from 'lucide-react'
-import axios from 'axios'
+import { runWorkflowNode } from '../../api/client'
 import './NodeEditor.css'
 
 const CATEGORY_COLOR = {
@@ -111,11 +111,7 @@ export default function NodeEditor() {
         id: n.id, type: n.type, position: n.position,
         data: { label: n.data.label, config: n.data.config || {} }
       }))
-      const res = await axios.post('/api/workflows/run-node', {
-        nodes: serialized,
-        edges,
-        node_id: selectedNode.id,
-      })
+      const res = await runWorkflowNode(serialized, edges, selectedNode.id)
       setStepResult(res.data)
       setRunResult(res.data)
     } catch (err) {
@@ -228,31 +224,40 @@ export default function NodeEditor() {
                   ) : (
                     <div className="ne__fields">
                       {schema.map(field => (
-                        <ParamField
-                          key={field.key}
-                          field={field}
-                          value={localConfig[field.key] ?? field.default ?? ''}
-                          onChange={v => handleChange(field.key, v)}
-                          onFocus={() => setFocusedField(field.key)}
-                          fieldRef={el => { fieldRefs.current[field.key] = el }}
-                          isFocused={focusedField === field.key}
-                          hasInput={hasInput}
-                          onDrop={e => {
-                            e.preventDefault()
-                            const name = dragFieldName.current || e.dataTransfer.getData('text/plain')
-                            const expr = `{{${name}}}`
-                            const cur = localConfig[field.key] || ''
-                            const ref = fieldRefs.current[field.key]
-                            if (ref?.selectionStart !== undefined) {
-                              const s = ref.selectionStart, en = ref.selectionEnd
-                              handleChange(field.key, cur.slice(0,s) + expr + cur.slice(en))
-                            } else {
-                              handleChange(field.key, cur + expr)
-                            }
-                            dragFieldName.current = null
-                          }}
-                          onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }}
-                        />
+                        field.type === 'conditions' ? (
+                          <ConditionsEditor
+                            key={field.key}
+                            value={localConfig[field.key] ?? []}
+                            onChange={v => handleChange(field.key, v)}
+                            dragFieldName={dragFieldName}
+                          />
+                        ) : (
+                          <ParamField
+                            key={field.key}
+                            field={field}
+                            value={localConfig[field.key] ?? field.default ?? ''}
+                            onChange={v => handleChange(field.key, v)}
+                            onFocus={() => setFocusedField(field.key)}
+                            fieldRef={el => { fieldRefs.current[field.key] = el }}
+                            isFocused={focusedField === field.key}
+                            hasInput={hasInput}
+                            onDrop={e => {
+                              e.preventDefault()
+                              const name = dragFieldName.current || e.dataTransfer.getData('text/plain')
+                              const expr = `{{${name}}}`
+                              const cur = localConfig[field.key] || ''
+                              const ref = fieldRefs.current[field.key]
+                              if (ref?.selectionStart !== undefined) {
+                                const s = ref.selectionStart, en = ref.selectionEnd
+                                handleChange(field.key, cur.slice(0,s) + expr + cur.slice(en))
+                              } else {
+                                handleChange(field.key, cur + expr)
+                              }
+                              dragFieldName.current = null
+                            }}
+                            onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }}
+                          />
+                        )
                       ))}
                     </div>
                   )
@@ -523,6 +528,7 @@ function FieldRow({ mapping, index, onUpdate, onRemove, onDropValue, onDragOver 
 function ParamField({ field, value, onChange, onFocus, fieldRef, isFocused, hasInput, onDrop, onDragOver }) {
   const { type, label, placeholder, options, help, min, max, step, required } = field
   if (field.key === 'field_mappings') return null // handled by SetTransformEditor
+  if (type === 'conditions') return null
   const cls = `pf__input${isFocused?' pf__input--focused':''}`
 
   return (
@@ -568,6 +574,87 @@ function ParamField({ field, value, onChange, onFocus, fieldRef, isFocused, hasI
         </div>
       )}
       {help && <p className="pf__help">{help}</p>}
+    </div>
+  )
+}
+
+function ConditionsEditor({ value, onChange, dragFieldName }) {
+  const conditions = Array.isArray(value) ? value : []
+
+  const addCondition = () => {
+    onChange([ ...conditions, { value1: '', operation: 'equals', value2: '' } ])
+  }
+
+  const updateCondition = (index, key, val) => {
+    const next = conditions.map((c, i) => i === index ? { ...c, [key]: val } : c)
+    onChange(next)
+  }
+
+  const removeCondition = (index) => {
+    const next = conditions.filter((_, i) => i !== index)
+    onChange(next.length ? next : [])
+  }
+
+  const onDropValue = (e, index, key) => {
+    e.preventDefault()
+    const name = dragFieldName.current || e.dataTransfer.getData('text/plain')
+    if (!name) return
+    const expr = `{{${name}}}`
+    const cur = conditions[index]?.[key] || ''
+    updateCondition(index, key, cur ? cur + expr : expr)
+    dragFieldName.current = null
+  }
+
+  const onDragOver = (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }
+
+  return (
+    <div className="pf">
+      <div className="pf__header">
+        <label className="pf__label">Conditions</label>
+      </div>
+      {conditions.length === 0 && (
+        <div className="ne__empty-panel">
+          <p>No conditions yet</p>
+          <button className="ne__execute-inline" onClick={addCondition}>Add Condition</button>
+        </div>
+      )}
+      {conditions.length > 0 && (
+        <div className="ne__fields">
+          {conditions.map((c, i) => (
+            <div key={i} className="pf__cond-row">
+              <input
+                className="pf__input"
+                placeholder="{{$json.field}} or field.path"
+                value={c.value1 || ''}
+                onChange={e => updateCondition(i, 'value1', e.target.value)}
+                onDrop={e => onDropValue(e, i, 'value1')}
+                onDragOver={onDragOver}
+              />
+              <select
+                className="pf__input pf__select"
+                value={c.operation || 'equals'}
+                onChange={e => updateCondition(i, 'operation', e.target.value)}
+              >
+                {[
+                  'equals','not equals','contains','not contains',
+                  'starts with','ends with','greater than','greater than or equal',
+                  'less than','less than or equal','is empty','is not empty'
+                ].map(op => <option key={op} value={op}>{op}</option>)}
+              </select>
+              <input
+                className="pf__input"
+                placeholder="value"
+                value={c.value2 || ''}
+                onChange={e => updateCondition(i, 'value2', e.target.value)}
+                onDrop={e => onDropValue(e, i, 'value2')}
+                onDragOver={onDragOver}
+              />
+              <button className="ne__execute-inline" onClick={() => removeCondition(i)}>Remove</button>
+            </div>
+          ))}
+          <button className="ne__execute-inline" onClick={addCondition}>Add Condition</button>
+        </div>
+      )}
     </div>
   )
 }

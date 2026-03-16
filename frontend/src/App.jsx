@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react'
 import { ReactFlowProvider } from '@xyflow/react'
 import useWorkflowStore from './store/workflowStore'
-import { fetchAvailableNodes, runWorkflow } from './api/client'
-import axios from 'axios'
+import {
+  fetchAvailableNodes,
+  runWorkflow,
+  activateSchedule,
+  deactivateSchedule,
+  registerWebhook,
+  unregisterWebhook,
+  testWebhook
+} from './api/client'
 import Sidebar from './components/Sidebar/Sidebar'
 import Canvas from './components/Canvas/Canvas'
 
@@ -63,7 +70,7 @@ export default function App() {
 
     if (scheduleActive) {
       try {
-        await axios.delete(`/api/workflows/schedule/${workflowId}`)
+        await deactivateSchedule(workflowId)
         removeSchedule(workflowId)
         setScheduleActiveLocal(false)
       } catch (e) {
@@ -72,13 +79,13 @@ export default function App() {
     } else {
       if (!cfg.workflow_id) { alert('Set a Workflow ID in the Schedule Trigger node first.'); return }
       try {
-        await axios.post('/api/workflows/schedule', {
-          workflow_id: workflowId,
-          nodes: getSerializedNodes(),
+        await activateSchedule(
+          workflowId,
+          getSerializedNodes(),
           edges,
-          interval_type: cfg.interval_type || 'hour',
-          interval_value: parseInt(cfg.interval_value || 1)
-        })
+          cfg.interval_type || 'hour',
+          parseInt(cfg.interval_value || 1)
+        )
         setScheduleActive(workflowId, { interval_type: cfg.interval_type, interval_value: cfg.interval_value })
         setScheduleActiveLocal(true)
       } catch (e) {
@@ -95,7 +102,7 @@ export default function App() {
     const method = (cfg.method || 'POST').toUpperCase()
     if (webhookActive) {
       try {
-        await axios.post('/api/workflows/webhook/unregister', { path, method })
+        await unregisterWebhook(path, method)
         setWebhookActive(false)
       } catch (e) {
         alert('Could not disable webhook: ' + (e.response?.data?.detail || e.message))
@@ -103,12 +110,7 @@ export default function App() {
       return
     }
     try {
-      await axios.post('/api/workflows/webhook/register', {
-        path,
-        method,
-        nodes: getSerializedNodes(),
-        edges,
-      })
+      await registerWebhook(path, method, getSerializedNodes(), edges)
       setWebhookActive(true)
     } catch (e) {
       alert('Could not activate webhook: ' + (e.response?.data?.detail || e.message))
@@ -123,11 +125,7 @@ export default function App() {
     setRunError(null)
     try {
       const payload = { test: true, triggered_at: new Date().toISOString() }
-      const res = await axios({
-        method: (cfg.method || 'POST').toLowerCase(),
-        url: `/api/webhooks${path}`,
-        data: payload
-      })
+      const res = await testWebhook(path, payload, (cfg.method || 'POST').toLowerCase())
       setRunResult(res.data)
     } catch (err) {
       const detail = err.response?.data?.detail
@@ -236,9 +234,7 @@ const FALLBACK_NODES = [
   { type:'code_node',       label:'Code (JavaScript)',    description:'Write custom JS to transform data',           category:'action',  color:'#eab308', icon:'</>',inputs:1, outputs:1, config_schema:[{key:'code',label:'JavaScript Code',type:'textarea',placeholder:'// input = previous node data\nreturn {\n  result: input.value\n}'}] },
   { type:'notification',    label:'Send Notification',    description:'Send email or Slack message',                 category:'action',  color:'#ec4899', icon:'🔔', inputs:1, outputs:1, config_schema:[{key:'channel',label:'Send via',type:'select',options:['Email (SMTP)','Slack Webhook'],default:'Email (SMTP)'},{key:'smtp_host',label:'SMTP Host',type:'text',placeholder:'smtp.gmail.com'},{key:'smtp_user',label:'Your Email',type:'text',placeholder:'you@gmail.com'},{key:'smtp_pass',label:'App Password',type:'text',placeholder:'xxxx xxxx xxxx'},{key:'to_email',label:'Send To',type:'text',placeholder:'colleague@company.com'},{key:'subject',label:'Subject',type:'text',placeholder:'Workflow Result'},{key:'message',label:'Message',type:'textarea',placeholder:'Result: {{data}}'},{key:'slack_webhook_url',label:'Slack Webhook URL',type:'text',placeholder:'https://hooks.slack.com/...'},{key:'slack_message',label:'Slack Message',type:'textarea',placeholder:'Result: {{data}}'}] },
   { type:'whatsapp',        label:'WhatsApp',             description:'Send WhatsApp via Twilio',                    category:'action',  color:'#25d366', icon:'💬', inputs:1, outputs:1, config_schema:[{key:'provider',label:'Provider',type:'select',options:['Twilio','simulate'],default:'simulate'},{key:'to_number',label:'To (phone)',type:'text',placeholder:'+919876543210'},{key:'message',label:'Message',type:'textarea',placeholder:'Result: {{data}}'}] },
-  { type:'if_condition',    label:'IF Condition',         description:'Branch based on a condition',                 category:'logic',   color:'#f97316', icon:'🔀', inputs:1, outputs:2, config_schema:[{key:'field',label:'Field to check',type:'text',placeholder:'status'},{key:'condition',label:'Condition',type:'select',options:['equals','not equals','greater than','less than','contains','is empty','is not empty']},{key:'value',label:'Value',type:'text',placeholder:'active'}] },
-  { type:'split',           label:'Split / Condition',    description:'Route data down different paths',             category:'logic',   color:'#ef4444', icon:'🔀', inputs:1, outputs:2, config_schema:[{key:'field',label:'Field to check',type:'text',placeholder:'status'},{key:'condition',label:'Condition',type:'select',options:['equals','not equals','greater than','less than','contains','is empty','is not empty']},{key:'value',label:'Value',type:'text',placeholder:'active'}] },
-  { type:'loop_node',       label:'Loop / Split Items',   description:'Process each item in a list',                 category:'logic',   color:'#8b5cf6', icon:'🔁', inputs:1, outputs:1, config_schema:[{key:'field',label:'List field',type:'text',placeholder:'items'},{key:'mode',label:'Output mode',type:'select',options:['Pass all items as array','Pass first item only','Pass last item only','Pass count only'],default:'Pass all items as array'},{key:'max_items',label:'Max items',type:'number',default:100}] },
-  { type:'merge',           label:'Merge',                description:'Combine data from multiple branches',         category:'logic',   color:'#64748b', icon:'🔗', inputs:2, outputs:1, config_schema:[{key:'mode',label:'How to merge',type:'select',options:['Combine into one object','Put into array','Keep first branch only','Keep second branch only'],default:'Combine into one object'}] },
+  { type:'filter_items',    label:'Filter Items',         description:'Allow or block items based on conditions',   category:'logic',   color:'#ef4444', icon:'F', inputs:1, outputs:2, config_schema:[{key:'combine_mode',label:'Combine Conditions',type:'select',options:['AND','OR'],default:'AND'},{key:'data_type',label:'Data Type',type:'select',options:['String','Number','Boolean','Date & Time'],default:'String'},{key:'conditions',label:'Conditions',type:'conditions'}] },
+  { type:'limit_items',     label:'Limit Items',          description:'Pass through only the first/last N items',   category:'logic',   color:'#64748b', icon:'N', inputs:1, outputs:1, config_schema:[{key:'count',label:'Max items',type:'number',default:10,min:1,max:1000},{key:'keep',label:'Keep',type:'select',options:['First Items','Last Items'],default:'First Items'}] },
   { type:'ai_node',         label:'AI Node',              description:'Process with AI model',                       category:'ai',      color:'#8b5cf6', icon:'🤖', inputs:1, outputs:1, config_schema:[{key:'provider',label:'Provider',type:'select',options:['simulate','ollama','openai_compatible'],default:'simulate'},{key:'model',label:'Model Name',type:'text',placeholder:'llama3'},{key:'prompt',label:'System Prompt',type:'textarea',placeholder:'Summarize this data:'}] },
 ]
